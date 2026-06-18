@@ -44,13 +44,18 @@ app.post("/process", (req, res) => {
 
   const tokenRegex = /^\S+$/;
   const idRegex = /^\d+$/;
+  const hexTokenRegex = /^0x[a-f0-9]+$/i;
+  const dateRegex = /^\d{4}-\d{2}-\d{2}/;
 
   const allRecords = [];
   let skippedLines = 0;
 
+  // Buffer for multi-line mode (each field on its own line)
+  let multiLineBuffer = [];
+
   lines.forEach((line) => {
-    // Support tab-separated or multiple-space-separated
-    const parts = line.split(/\t|\s{2,}/).map((p) => p.trim());
+    // Support tab-separated, single-space, or multiple-space-separated
+    const parts = line.split(/\t|\s+/).map((p) => p.trim()).filter((p) => p !== "");
 
     // Skip header rows
     if (
@@ -60,11 +65,17 @@ app.post("/process", (req, res) => {
       return;
     }
 
+    // Case 1: All fields on a single line (tab or multi-space separated)
     if (
       parts.length >= 3 &&
       tokenRegex.test(parts[0]) &&
       idRegex.test(parts[1])
     ) {
+      // Flush any pending multi-line buffer
+      if (multiLineBuffer.length > 0) {
+        skippedLines += multiLineBuffer.length;
+        multiLineBuffer = [];
+      }
       // datetime may be split across parts[2] and parts[3] if space between date and time
       const dateStr =
         parts.length >= 4 ? parts[2] + " " + parts[3] : parts[2];
@@ -75,10 +86,45 @@ app.post("/process", (req, res) => {
         date: dateStr,
         dateValue: parseDateTimeValue(dateStr),
       });
+    }
+    // Case 2: Single value per line — accumulate into buffer
+    else if (parts.length === 1) {
+      multiLineBuffer.push(parts[0]);
+
+      // When we have 3 lines buffered, try to form a record
+      if (multiLineBuffer.length === 3) {
+        const [val1, val2, val3] = multiLineBuffer;
+
+        if (
+          tokenRegex.test(val1) &&
+          idRegex.test(val2) &&
+          dateRegex.test(val3)
+        ) {
+          allRecords.push({
+            token: val1.toUpperCase(),
+            id: val2,
+            date: val3,
+            dateValue: parseDateTimeValue(val3),
+          });
+        } else {
+          skippedLines += 3;
+        }
+        multiLineBuffer = [];
+      }
     } else {
+      // Flush buffer — these lines don't fit either pattern
+      if (multiLineBuffer.length > 0) {
+        skippedLines += multiLineBuffer.length;
+        multiLineBuffer = [];
+      }
       skippedLines++;
     }
   });
+
+  // Flush any remaining buffer lines
+  if (multiLineBuffer.length > 0) {
+    skippedLines += multiLineBuffer.length;
+  }
 
   if (allRecords.length === 0) {
     return res.render("index", {
